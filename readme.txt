@@ -2,7 +2,7 @@ Original Source Code by Egor-Skriptunoff
 Source Code : https://github.com/Egor-Skriptunoff/pure_lua_SHA
 MIT License
 ------------------------------------------------
-Ported to Hollywood by Fabio Falcucci
+Ported to Hollywood by Fabio Falcucci (me)
 Completed : 03/11/2021
 Version   : 1.0
 Contact   : info@a-mc.biz
