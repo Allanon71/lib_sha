@@ -42,7 +42,7 @@
        .bin2base64
 */
 
-Local print_debug_messages = False ; set to true to view some messages about your system's abilities and implementation branch chosen for your system
+Local sha_debug =  False; set to true to view some messages about your system's abilities and implementation branch chosen for your system
 
 ; Remap some functions to simulate the LUA behaviours
 Local unpack       = Unpack
@@ -162,6 +162,8 @@ EndFunction
 Local x = 2/3
 Local Lua_has_double = x * 5 > 3 And x * 4 < 3 And get_precision(1.0) >= 53
 
+If sha_debug Then DebugPrint("Has double: ", Lua_has_double)
+
 ;-- Q:
 ;--    SHA2 was designed for FPU-less machines.
 ;--    So, why floating point numbers are needed for this module?
@@ -172,36 +174,221 @@ Local int_prec, Lua_has_integers = get_precision(1)
 Local Lua_has_int64 = (Lua_has_integers And int_prec = 64)
 Local Lua_has_int32 = (Lua_has_integers And int_prec = 32)
 
+If sha_debug Then DebugPrint("Has int64: ", Lua_has_int64)
+If sha_debug Then DebugPrint("Has int32: ", Lua_has_int32)
+
+;=================================================
+;=================================================
+; ---------------------------------------------------
+; HANDLER FOR BUG IN ARM DEVICES FOR BITWISE OPERATIONS
+Local handle_hw_bug = True
+Local v = GetVersion()
+If v.platform = "Win32" Then handle_hw_bug = False
 ; ---------------------------------------------------
 ; Manual settings
 Local method = "Emulating bitwise operators using look-up table"
 Local branch = "EMUL"
 
-Function _SHL(x, y) Return(Shl(x, y)) EndFunction
-Function _SHR(x, y) Return(Shr(x, y)) EndFunction
-Function _ROL(x, y) Return(Rol(x, y)) EndFunction
-Function _ROR(x, y) Return(Ror(x, y)) EndFunction
-Function _AND(x, y) Return(x & y) EndFunction
-Function _OR(x, y) Return(x | y) EndFunction
+Local max32bit = 4294967295
+Local max48bit = 2^48-1
+
+Local overflow  = max32bit + 1
+Local overflow2 = max48bit + 1
+Local mb = 0 ; Dal test sembra che i numeri non superino mai i 49 bit
+
+Local cache    = {}
+Local bitchecker = {}
+; Init bit checker
+For Local b = 32 To 63
+  bitchecker[b] =  { _max = 2^b-1, overflow = 2^b }
+Next
+Local force32bit =
+  Function(n)
+    If HaveItem(cache, n) Then Return(cache[n])
+    If n < overflow Then Return(n)
+    
+    DisableLinehook()
+    Local i = n
+    For Local b = 51 To 32 Step -1
+      If n > bitchecker[b]._max
+        While n > bitchecker[b]._max
+          n = n-bitchecker[b].overflow
+          ;If b>mb Then mb = b ; Serve a vedere quanti bit al massimo abbiamo
+        Wend
+      EndIf
+    Next
+    cache[i] = n
+    
+    EnableLineHook()
+
+    Return(n)
+    
+  EndFunction
+
+If Not(handle_hw_bug) Then force32bit = Function(n) Return(n) EndFunction
+;=================================================
+;=================================================
+  
+Function _SHL(x, y)
+  Local n  = force32bit(x)
+  Local r = Shl(n, y)
+  Return(r) 
+EndFunction
+Function _SHR(x, y)
+  Local n = force32bit(x)
+  Local r = Shr(n, y)
+  Return(r)
+EndFunction
+Function _ROL(x, y)
+  Local n = force32bit(x)
+  Local r = Rol(n, y)
+  Return(r) 
+EndFunction
+Function _ROR(x, y) 
+  Local n = force32bit(x)
+  Local r = Ror(n, y)
+  Return(r) 
+EndFunction
+Function _AND(x, y)
+  Local n1, n2 = x, y
+  If x>0 Then n1 = force32Bit(x)
+  If y>0 Then n2 = force32Bit(y)
+  Local r = n1 & n2
+  Return(r) 
+EndFunction
+Function _OR(x, y)
+  Local n1 = force32Bit(x)
+  Local n2 = force32Bit(y)
+  Local r = n1 | n2
+  Return(r) 
+EndFunction
+Function _NOT(x)
+  Local n1 = force32Bit(x)
+  Local r = ~n1
+  Return(r) 
+EndFunction
 Function _XOR(a, b, c, d, e)
   If Not(IsNil(e))
-    Return(
-      BitXor(BitXor(BitXor(BitXor(a, b), c), d), e)
-      )
+    Local n1 = force32Bit(a)
+    Local n2 = force32Bit(b)
+    Local n3 = force32Bit(c)
+    Local n4 = force32Bit(d)
+    Local n5 = force32Bit(e)
+    Local r = BitXor(BitXor(BitXor(BitXor(n1, n2), n3), n4), n5)
+    Return(r)
   ElseIf Not(IsNil(d))
-    Return(
-      BitXor(BitXor(BitXor(a, b), c), d)
-      )
+    Local n1 = force32Bit(a)
+    Local n2 = force32Bit(b)
+    Local n3 = force32Bit(c)
+    Local n4 = force32Bit(d)
+    Local r = BitXor(BitXor(BitXor(n1, n2), n3), n4)
+    Return(r)
   ElseIf Not(IsNil(c))
-    Return(
-      BitXor(BitXor(a, b), c)
-      )
+    Local n1 = force32Bit(a)
+    Local n2 = force32Bit(b)
+    Local n3 = force32Bit(c)
+    Local r = BitXor(BitXor(n1, n2), n3)
+    Return(r)
   Else
-    Return(
-        BitXor(a, b)
-        )
+    Local n1 = force32Bit(a)
+    Local n2 = force32Bit(b)
+    Local r = BitXor(n1, n2)
+    Return(r)
   EndIf
 EndFunction
+
+/*
+If EmulateBitOps
+  _SHL = BA_Shl
+  _SHR = BA_Shr
+EndIf
+
+
+Local v = 5140528219
+DebugPrint("Conversion timings")
+StartTimer(1)
+DisableLineHook()
+For Local i = 1 To 10000
+  ;numToBitArray(v)
+  n = BA_Shl(v, 1)
+Next
+EnableLineHook()
+Local t = GetTimer(1)
+DebugPrint("Total time (x10000): ", t)
+
+DebugPrint("test number: ", v, BinStr(v))
+DebugPrint("Testing Shift Left")
+Local r = BA_Shl(v, 1)
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Testing Shift Right")
+Local r = BA_Shr(v, 1)
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Shr ", BinStr(Shr(v, 1)))
+DebugPrint("Testing Rotate Left")
+Local r = BA_Rol(v, 1)
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Testing Rotate Right")
+Local r = BA_Ror(v, 1)
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Testing And")
+Local n2 = "11001100110011001100110011001100"
+Local r = BA_And(v, ToNumber(n2, 2))
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("AND ", n2)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Testing Or")
+Local n2 = "11001100110011001100110011001100"
+Local r = BA_Or(v, ToNumber(n2, 2))
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("Or  ", n2)
+DebugPrint("=>  ", BinStr(r), r)
+DebugPrint("Testing Xor")
+Local n2 = "11001100110011001100110011001100"
+Local r = BA_Xor(v, ToNumber(n2, 2))
+DebugPrint("SRC ", BinStr(v), v)
+DebugPrint("Xor ", n2)
+DebugPrint("=>  ", BinStr(r), r)
+
+;===========================================================================
+; END OF EMULATION CODE
+;===========================================================================
+*/
+
+/*
+; Try to split it
+Local max32bit = 4294967295
+Local low = v & max32bit
+DebugPrint(low, BinStr(low), BinStr(845560923))
+Local low2 = v - max32bit
+DebugPrint(low2, BinStr(low2), BinStr(845560923))
+
+Local high = v-low
+DebugPrint(high)
+For i = 1 To 32
+  high = high/2
+Next
+DebugPrint(BinStr(high) .. " " .. BinStr(low))
+DebugPrint("SHIFT LEFT")
+high = Shl(high, 1)
+If BitTest(low, 31) Then BitSet(high, 0)
+low  = Shl(low, 1)
+DebugPrint(BinStr(high) .. " " .. BinStr(low))
+
+For i = 1 To 32
+  high = high * 2
+Next
+Local n = high + low
+DebugPrint(n)
+
+DebugPrint(v, BinStr(v))
+DebugPrint(v, _ROL(v, 13), _ROL(v, 15), ROL(v, 10))
+*/
+
+
 
 Function _XOR_BYTE(x, y)
   x = x & ToNumber("11111111", 2)
@@ -252,7 +439,7 @@ Local Function build_keccak_format(elem)
 EndFunction
 
 Function sha256_feed_64(H, str, offs, size)
-  ;-- offs >= 0, size >= 0, size is multiple of 64
+  ;-- offs >= 0, size >= 0, size is multiple of 64  
   Local W, K = common_W, sha2_K_hi
   Local h1, h2, h3, h4, h5, h6, h7, h8 = H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
   For pos = offs To offs + size - 1 Step 64
@@ -260,16 +447,26 @@ Function sha256_feed_64(H, str, offs, size)
     For j = 1 To 16
       pos = pos + 4
       Local tmp = byte(str, pos - 3, pos) ; byte is customized
+      ;If sha_debug Then DebugPrint("pos:" .. pos, "j:" .. j, "tmp[]:" .. tmp[0] .. " " .. tmp[1] .. " " .. tmp[2] .. " " .. tmp[3])
       Local a, b, c, d = tmp[0], tmp[1], tmp[2], tmp[3]
       W[j] = ((a * 256 + b) * 256 + c) * 256 + d
     Next
     For j = 17 To 64
       Local a, b = W[j-15], W[j-2]
-      W[j] = _XOR(_ROR(a, 7), _ROL(a, 14), _SHR(a, 3)) + _XOR(_ROL(b, 15), _ROL(b, 13), _SHR(b, 10)) + W[j-7] + W[j-16]
+      Local r1 = _ROR(a, 7)
+      Local r2 = _ROL(a, 14)
+      Local r3 = _SHR(a, 3)
+      Local r4 = _ROL(b, 15)
+      Local r5 = _ROL(b, 13)
+      Local r6 = _SHR(b, 10)
+      Local x1 = _XOR(r1, r2, r3)
+      Local x2 = _XOR(r4, r5, r6)
+      W[j] = x1 + x2 + W[j-7] + W[j-16]
+      
     Next
     Local a, b, c, d, e, f, g, h = h1, h2, h3, h4, h5, h6, h7, h8
     For j = 1 To 64
-      Local z = _XOR(_ROR(e, 6), _ROR(e, 11), _ROL(e, 7)) + _AND(e, f) + _AND(-1-e, g) + h + K[j] + W[j]
+      Local z = _XOR(_ROR(e, 6), _ROR(e, 11), _ROL(e, 7)) + _AND(e, f) + _AND(_NOT(e), g) + h + K[j] + W[j]
       h = g
       g = f
       f = e
@@ -285,6 +482,7 @@ Function sha256_feed_64(H, str, offs, size)
     ; h5, h6, h7, h8 = (e + h5) % 4294967296, (f + h6) % 4294967296, (g + h7) % 4294967296, (h + h8) % 4294967296
   Next
   H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8] = h1, h2, h3, h4, h5, h6, h7, h8
+  
 EndFunction
 
 Function sha512_feed_128(H_lo, H_hi, str, offs, size)
@@ -313,9 +511,9 @@ Function sha512_feed_128(H_lo, H_hi, str, offs, size)
     Local a_hi, b_hi, c_hi, d_hi, e_hi, f_hi, g_hi, h_hi = h1_hi, h2_hi, h3_hi, h4_hi, h5_hi, h6_hi, h7_hi, h8_hi
     For j = 1 To 80
       Local jj = 2*j
-      Local tmp1 = _XOR(_SHR(e_lo, 14) + _SHL(e_hi, 18), _SHR(e_lo, 18) + _SHL(e_hi, 14), _SHL(e_lo, 23) + _SHR(e_hi, 9)) % 4294967296 + _MOD((_AND(e_lo, f_lo) + _AND(-1-e_lo, g_lo)), 4294967296) + h_lo + K_lo[j] + W[jj]
+      Local tmp1 = _XOR(_SHR(e_lo, 14) + _SHL(e_hi, 18), _SHR(e_lo, 18) + _SHL(e_hi, 14), _SHL(e_lo, 23) + _SHR(e_hi, 9)) % 4294967296 + _MOD((_AND(e_lo, f_lo) + _AND(_NOT(e_lo), g_lo)), 4294967296) + h_lo + K_lo[j] + W[jj]
       Local z_lo = _MOD(tmp1, 4294967296)
-      Local z_hi = _XOR(_SHR(e_hi, 14) + _SHL(e_lo, 18), _SHR(e_hi, 18) + _SHL(e_lo, 14), _SHL(e_hi, 23) + _SHR(e_lo, 9)) + _AND(e_hi, f_hi) + _AND(-1-e_hi, g_hi) + h_hi + K_hi[j] + W[jj-1] + (tmp1 - z_lo) / 4294967296
+      Local z_hi = _XOR(_SHR(e_hi, 14) + _SHL(e_lo, 18), _SHR(e_hi, 18) + _SHL(e_lo, 14), _SHL(e_hi, 23) + _SHR(e_lo, 9)) + _AND(e_hi, f_hi) + _AND(_NOT(e_hi), g_hi) + h_hi + K_hi[j] + W[jj-1] + (tmp1 - z_lo) / 4294967296
       h_lo = g_lo
       h_hi = g_hi
       g_lo = f_lo
@@ -379,7 +577,7 @@ Function md5_feed_64(H, str, offs, size)
     Local a, b, c, d = h1, h2, h3, h4
     Local s = 32-7
     For j = 1 To 16
-      Local F = _ROR(_AND(b, c) + _AND(-1-b, d) + a + K[j] + W[j], s) + b
+      Local F = _ROR(_AND(b, c) + _AND(_NOT(b), d) + a + K[j] + W[j], s) + b
       s = md5_next_shift[s]
       a = d
       d = c
@@ -388,7 +586,7 @@ Function md5_feed_64(H, str, offs, size)
     Next
     s = 32-5
     For j = 17 To 32
-      Local F = _ROR(_AND(d, b) + _AND(-1-d, c) + a + K[j] + W[(5*j-4) % 16 + 1], s) + b
+      Local F = _ROR(_AND(d, b) + _AND(_NOT(d), c) + a + K[j] + W[(5*j-4) % 16 + 1], s) + b
       s = md5_next_shift[s]
       a = d
       d = c
@@ -406,7 +604,7 @@ Function md5_feed_64(H, str, offs, size)
     Next
     s = 32-6
     For j = 49 To 64
-      Local F = _ROR(_XOR(c, _OR(b, -1-d)) + a + K[j] + W[(j*7-7) % 16 + 1], s) + b
+      Local F = _ROR(_XOR(c, _OR(b, _NOT(d))) + a + K[j] + W[(j*7-7) % 16 + 1], s) + b
       s = md5_next_shift[s]
       a = d
       d = c
@@ -438,7 +636,7 @@ Function sha1_feed_64(H, str, offs, size)
     Next
     Local a, b, c, d, e = h1, h2, h3, h4, h5
     For j = 1 To 20
-      Local z = _ROL(a, 5) + _AND(b, c) + _AND(-1-b, d) + 0x5A827999 + W[j] + e ; -- constant = floor(2^30 * sqrt(2))
+      Local z = _ROL(a, 5) + _AND(b, c) + _AND(_NOT(b), d) + 0x5A827999 + W[j] + e ; -- constant = floor(2^30 * sqrt(2))
       e = d
       d = c
       c = _ROR(b, 2)
@@ -623,16 +821,16 @@ Function keccak_feed(lanes_lo, lanes_hi, str, offs, size, block_size_in_bytes)
       L21_hi = (T3_hi % 2^32 - T3_hi % 2^23) / 2^23 + T3_lo * 2^9
       L01_lo = _XOR(D_lo, L01_lo)
       L01_hi = _XOR(D_hi, L01_hi)
-      L01_lo, L02_lo, L03_lo, L04_lo, L05_lo = _XOR(L01_lo, _AND(-1-L02_lo, L03_lo)), _XOR(L02_lo, _AND(-1-L03_lo, L04_lo)), _XOR(L03_lo, _AND(-1-L04_lo, L05_lo)), _XOR(L04_lo, _AND(-1-L05_lo, L01_lo)), _XOR(L05_lo, _AND(-1-L01_lo, L02_lo))
-      L01_hi, L02_hi, L03_hi, L04_hi, L05_hi = _XOR(L01_hi, _AND(-1-L02_hi, L03_hi)), _XOR(L02_hi, _AND(-1-L03_hi, L04_hi)), _XOR(L03_hi, _AND(-1-L04_hi, L05_hi)), _XOR(L04_hi, _AND(-1-L05_hi, L01_hi)), _XOR(L05_hi, _AND(-1-L01_hi, L02_hi))
-      L06_lo, L07_lo, L08_lo, L09_lo, L10_lo = _XOR(L09_lo, _AND(-1-L10_lo, L06_lo)), _XOR(L10_lo, _AND(-1-L06_lo, L07_lo)), _XOR(L06_lo, _AND(-1-L07_lo, L08_lo)), _XOR(L07_lo, _AND(-1-L08_lo, L09_lo)), _XOR(L08_lo, _AND(-1-L09_lo, L10_lo))
-      L06_hi, L07_hi, L08_hi, L09_hi, L10_hi = _XOR(L09_hi, _AND(-1-L10_hi, L06_hi)), _XOR(L10_hi, _AND(-1-L06_hi, L07_hi)), _XOR(L06_hi, _AND(-1-L07_hi, L08_hi)), _XOR(L07_hi, _AND(-1-L08_hi, L09_hi)), _XOR(L08_hi, _AND(-1-L09_hi, L10_hi))
-      L11_lo, L12_lo, L13_lo, L14_lo, L15_lo = _XOR(L12_lo, _AND(-1-L13_lo, L14_lo)), _XOR(L13_lo, _AND(-1-L14_lo, L15_lo)), _XOR(L14_lo, _AND(-1-L15_lo, L11_lo)), _XOR(L15_lo, _AND(-1-L11_lo, L12_lo)), _XOR(L11_lo, _AND(-1-L12_lo, L13_lo))
-      L11_hi, L12_hi, L13_hi, L14_hi, L15_hi = _XOR(L12_hi, _AND(-1-L13_hi, L14_hi)), _XOR(L13_hi, _AND(-1-L14_hi, L15_hi)), _XOR(L14_hi, _AND(-1-L15_hi, L11_hi)), _XOR(L15_hi, _AND(-1-L11_hi, L12_hi)), _XOR(L11_hi, _AND(-1-L12_hi, L13_hi))
-      L16_lo, L17_lo, L18_lo, L19_lo, L20_lo = _XOR(L20_lo, _AND(-1-L16_lo, L17_lo)), _XOR(L16_lo, _AND(-1-L17_lo, L18_lo)), _XOR(L17_lo, _AND(-1-L18_lo, L19_lo)), _XOR(L18_lo, _AND(-1-L19_lo, L20_lo)), _XOR(L19_lo, _AND(-1-L20_lo, L16_lo))
-      L16_hi, L17_hi, L18_hi, L19_hi, L20_hi = _XOR(L20_hi, _AND(-1-L16_hi, L17_hi)), _XOR(L16_hi, _AND(-1-L17_hi, L18_hi)), _XOR(L17_hi, _AND(-1-L18_hi, L19_hi)), _XOR(L18_hi, _AND(-1-L19_hi, L20_hi)), _XOR(L19_hi, _AND(-1-L20_hi, L16_hi))
-      L21_lo, L22_lo, L23_lo, L24_lo, L25_lo = _XOR(L23_lo, _AND(-1-L24_lo, L25_lo)), _XOR(L24_lo, _AND(-1-L25_lo, L21_lo)), _XOR(L25_lo, _AND(-1-L21_lo, L22_lo)), _XOR(L21_lo, _AND(-1-L22_lo, L23_lo)), _XOR(L22_lo, _AND(-1-L23_lo, L24_lo))
-      L21_hi, L22_hi, L23_hi, L24_hi, L25_hi = _XOR(L23_hi, _AND(-1-L24_hi, L25_hi)), _XOR(L24_hi, _AND(-1-L25_hi, L21_hi)), _XOR(L25_hi, _AND(-1-L21_hi, L22_hi)), _XOR(L21_hi, _AND(-1-L22_hi, L23_hi)), _XOR(L22_hi, _AND(-1-L23_hi, L24_hi))
+      L01_lo, L02_lo, L03_lo, L04_lo, L05_lo = _XOR(L01_lo, _AND(_NOT(L02_lo), L03_lo)), _XOR(L02_lo, _AND(_NOT(L03_lo), L04_lo)), _XOR(L03_lo, _AND(_NOT(L04_lo), L05_lo)), _XOR(L04_lo, _AND(_NOT(L05_lo), L01_lo)), _XOR(L05_lo, _AND(_NOT(L01_lo), L02_lo))
+      L01_hi, L02_hi, L03_hi, L04_hi, L05_hi = _XOR(L01_hi, _AND(_NOT(L02_hi), L03_hi)), _XOR(L02_hi, _AND(_NOT(L03_hi), L04_hi)), _XOR(L03_hi, _AND(_NOT(L04_hi), L05_hi)), _XOR(L04_hi, _AND(_NOT(L05_hi), L01_hi)), _XOR(L05_hi, _AND(_NOT(L01_hi), L02_hi))
+      L06_lo, L07_lo, L08_lo, L09_lo, L10_lo = _XOR(L09_lo, _AND(_NOT(L10_lo), L06_lo)), _XOR(L10_lo, _AND(_NOT(L06_lo), L07_lo)), _XOR(L06_lo, _AND(_NOT(L07_lo), L08_lo)), _XOR(L07_lo, _AND(_NOT(L08_lo), L09_lo)), _XOR(L08_lo, _AND(_NOT(L09_lo), L10_lo))
+      L06_hi, L07_hi, L08_hi, L09_hi, L10_hi = _XOR(L09_hi, _AND(_NOT(L10_hi), L06_hi)), _XOR(L10_hi, _AND(_NOT(L06_hi), L07_hi)), _XOR(L06_hi, _AND(_NOT(L07_hi), L08_hi)), _XOR(L07_hi, _AND(_NOT(L08_hi), L09_hi)), _XOR(L08_hi, _AND(_NOT(L09_hi), L10_hi))
+      L11_lo, L12_lo, L13_lo, L14_lo, L15_lo = _XOR(L12_lo, _AND(_NOT(L13_lo), L14_lo)), _XOR(L13_lo, _AND(_NOT(L14_lo), L15_lo)), _XOR(L14_lo, _AND(_NOT(L15_lo), L11_lo)), _XOR(L15_lo, _AND(_NOT(L11_lo), L12_lo)), _XOR(L11_lo, _AND(_NOT(L12_lo), L13_lo))
+      L11_hi, L12_hi, L13_hi, L14_hi, L15_hi = _XOR(L12_hi, _AND(_NOT(L13_hi), L14_hi)), _XOR(L13_hi, _AND(_NOT(L14_hi), L15_hi)), _XOR(L14_hi, _AND(_NOT(L15_hi), L11_hi)), _XOR(L15_hi, _AND(_NOT(L11_hi), L12_hi)), _XOR(L11_hi, _AND(_NOT(L12_hi), L13_hi))
+      L16_lo, L17_lo, L18_lo, L19_lo, L20_lo = _XOR(L20_lo, _AND(_NOT(L16_lo), L17_lo)), _XOR(L16_lo, _AND(_NOT(L17_lo), L18_lo)), _XOR(L17_lo, _AND(_NOT(L18_lo), L19_lo)), _XOR(L18_lo, _AND(_NOT(L19_lo), L20_lo)), _XOR(L19_lo, _AND(_NOT(L20_lo), L16_lo))
+      L16_hi, L17_hi, L18_hi, L19_hi, L20_hi = _XOR(L20_hi, _AND(_NOT(L16_hi), L17_hi)), _XOR(L16_hi, _AND(_NOT(L17_hi), L18_hi)), _XOR(L17_hi, _AND(_NOT(L18_hi), L19_hi)), _XOR(L18_hi, _AND(_NOT(L19_hi), L20_hi)), _XOR(L19_hi, _AND(_NOT(L20_hi), L16_hi))
+      L21_lo, L22_lo, L23_lo, L24_lo, L25_lo = _XOR(L23_lo, _AND(_NOT(L24_lo), L25_lo)), _XOR(L24_lo, _AND(_NOT(L25_lo), L21_lo)), _XOR(L25_lo, _AND(_NOT(L21_lo), L22_lo)), _XOR(L21_lo, _AND(_NOT(L22_lo), L23_lo)), _XOR(L22_lo, _AND(_NOT(L23_lo), L24_lo))
+      L21_hi, L22_hi, L23_hi, L24_hi, L25_hi = _XOR(L23_hi, _AND(_NOT(L24_hi), L25_hi)), _XOR(L24_hi, _AND(_NOT(L25_hi), L21_hi)), _XOR(L25_hi, _AND(_NOT(L21_hi), L22_hi)), _XOR(L21_hi, _AND(_NOT(L22_hi), L23_hi)), _XOR(L22_hi, _AND(_NOT(L23_hi), L24_hi))
       L01_lo = _XOR(L01_lo, RC_lo[round_idx])
       L01_hi = L01_hi + RC_hi[round_idx] ;-- RC_hi[] is either 0 or 0x80000000, so we could use fast addition instead of slow XOR
     Next
@@ -831,12 +1029,16 @@ EndBlock
 ;--------------------------------------------------------------------------------
 
 Local Function sha256ext(width, message)
-  ;-- Create an instance (private objects for current calculation)
+  ;-- Create an instance (private objects for current calculation)  
   Local H, length, tail = CopyTable(sha2_H_ext256[width]), 0.0, ""
+  
   Local Function partial(message_part)
+    
     If Not(IsNil(message_part))
-      If Not(IsNil(tail))
+    
+      If Not(IsNil(tail))        
         length = length + ByteLen(message_part) ; #message_part
+        
         Local offs = 0
         If tail <> "" And ByteLen(tail) + ByteLen(message_part) >= 64
            offs = 64 - ByteLen(tail)
@@ -1760,6 +1962,9 @@ Local Function test_base64()
   DebugPrint("+---------------------------------+")
   DebugPrint("| TESTING...                      |")
   DebugPrint("+---------------------------------+")
+  
+  StartTimer(1)
+  
   Assert(sha.sha224("abc") = "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7")
   Assert(sha.sha224("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") = "75388b16512776cc5dba5da1fd890150b0c6455cb4f58b1952522525")
   
@@ -1779,10 +1984,29 @@ Local Function test_base64()
   test_sha3()
   test_hmac()
   test_base64()
-  
+   
+  DebugPrint("Elapsed: ", GetTimer(1) .. "ms")
   DebugPrint("\n\n*** ALL TESTS PASSED ***")
   DebugPrompt("\nHIT ENTER TO END")
 EndFunction
 
-; test_hash_lib()
+/* ELAPSED
+   Con controllo 32bit
+   -  96990ms
+   -   3140ms usando Cast()    -> Su ARM non funziona
+   -  61575ms usando if multiplo
+   -  11920ms usando loop matematico (senza cache 36659ms)
+   - Usando da 51 a 32 bit
+   -   7517ms
+   -   5160ms senza linehook
+   -   4059ms come sopra ma con un controllo aggiuntivo
+   -   On ARM (Pi 4) : 91372ms
+   Senza controllo
+   -   2744ms
+*/
 
+/* TEST
+@DISPLAY { Hidden = True }
+@OPTIONS { EnableDebug = True }
+test_hash_lib()
+*/
