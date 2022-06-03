@@ -2006,3 +2006,20 @@ EndFunction
    Senza controllo
    -   2744ms
 */
+
+/*
+; TEST
+@DISPLAY { Hidden = True }
+@OPTIONS { EnableDebug = True }
+;test_hash_lib()
+  Local hmac = sha.hmac
+  DebugPrint("  Testing hmac...")
+  Local msg = [[{
+        "key": "Vom9ZApEGDCS6AVDWCBwhZgh0odwmI",
+        "nonce": "1653663314270"
+}
+]]
+DebugPrint(hmac(sha.sha512, "LSYxXPP6daBWidLmtddtpHMrhvzYN5QbCKqKhahsnVzH4u3dDt", msg))
+DebugPrint(sha.sha512(msg))
+DebugPrompt("?")
+*/
