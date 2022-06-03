@@ -181,7 +181,7 @@ If sha_debug Then DebugPrint("Has int32: ", Lua_has_int32)
 ;=================================================
 ; ---------------------------------------------------
 ; HANDLER FOR BUG IN ARM DEVICES FOR BITWISE OPERATIONS
-Local handle_hw_bug = True
+Local handle_hw_bug = False
 Local v = GetVersion()
 If v.platform = "Win32" Then handle_hw_bug = False
 ; ---------------------------------------------------
@@ -199,31 +199,33 @@ Local mb = 0 ; Dal test sembra che i numeri non superino mai i 49 bit
 Local cache    = {}
 Local bitchecker = {}
 ; Init bit checker
-For Local b = 32 To 63
-  bitchecker[b] =  { _max = 2^b-1, overflow = 2^b }
-Next
-Local force32bit =
-  Function(n)
-    If HaveItem(cache, n) Then Return(cache[n])
-    If n < overflow Then Return(n)
-    
-    DisableLinehook()
-    Local i = n
-    For Local b = 51 To 32 Step -1
-      If n > bitchecker[b]._max
-        While n > bitchecker[b]._max
-          n = n-bitchecker[b].overflow
-          ;If b>mb Then mb = b ; Serve a vedere quanti bit al massimo abbiamo
-        Wend
-      EndIf
-    Next
-    cache[i] = n
-    
-    EnableLineHook()
+If handle_hw_bug
+  For Local b = 32 To 63
+    bitchecker[b] =  { _max = 2^b-1, overflow = 2^b }
+  Next
+  Local force32bit =
+    Function(n)
+      If HaveItem(cache, n) Then Return(cache[n])
+      If n < overflow Then Return(n)
+      
+      DisableLinehook()
+      Local i = n
+      For Local b = 51 To 32 Step -1
+        If n > bitchecker[b]._max
+          While n > bitchecker[b]._max
+            n = n-bitchecker[b].overflow
+            ;If b>mb Then mb = b ; Serve a vedere quanti bit al massimo abbiamo
+          Wend
+        EndIf
+      Next
+      cache[i] = n
+      
+      EnableLineHook()
 
-    Return(n)
-    
-  EndFunction
+      Return(n)
+      
+    EndFunction
+EndIf
 
 If Not(handle_hw_bug) Then force32bit = Function(n) Return(n) EndFunction
 ;=================================================
@@ -2005,8 +2007,19 @@ EndFunction
    -   2744ms
 */
 
-/* TEST
+/*
+; TEST
 @DISPLAY { Hidden = True }
 @OPTIONS { EnableDebug = True }
-test_hash_lib()
+;test_hash_lib()
+  Local hmac = sha.hmac
+  DebugPrint("  Testing hmac...")
+  Local msg = [[{
+        "key": "Vom9ZApEGDCS6AVDWCBwhZgh0odwmI",
+        "nonce": "1653663314270"
+}
+]]
+DebugPrint(hmac(sha.sha512, "LSYxXPP6daBWidLmtddtpHMrhvzYN5QbCKqKhahsnVzH4u3dDt", msg))
+DebugPrint(sha.sha512(msg))
+DebugPrompt("?")
 */
